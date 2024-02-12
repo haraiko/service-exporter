@@ -6,7 +6,6 @@ import (
     "os/exec"
     "strings"
     "time" // Import the time package
-    "regexp"
     "github.com/prometheus/client_golang/prometheus"
     "github.com/prometheus/client_golang/prometheus/promhttp"
 )
@@ -22,9 +21,13 @@ var (
 )
 
 func getServiceStatus() {
-    out, err := exec.Command("systemctl", "list-units", "--type=service", "--state=active", "--no-pager", "--no-legend").Output()
+    serviceStatus.Reset()
+
+    cmd := exec.Command("systemctl", "list-units", "--type=service", "--state=active,inactive,failed", "--no-pager", "--no-legend")
+    out, err := cmd.CombinedOutput()
     if err != nil {
         fmt.Println("Error running systemctl:", err)
+        fmt.Println("Output:", string(out))
         return
     }
 
@@ -37,18 +40,6 @@ func getServiceStatus() {
             lifetime := fields[2]
             memory := fields[3]
 
-            // Check if service name matches the pattern to skip
-            skipPattern := "systemd-.*\\.service"
-            matched, err := regexp.MatchString(skipPattern, serviceName)
-            if err != nil {
-                fmt.Println("Error matching service name pattern:", err)
-                continue
-            }
-            if matched {
-                fmt.Println("Skipping service:", serviceName)
-                continue
-            }
-
             // Check if service is enabled
             enabled := "unknown"
             if len(fields) >= 6 {
@@ -59,11 +50,23 @@ func getServiceStatus() {
                 }
             }
 
-            // Set gauge value for running services
-            serviceStatus.WithLabelValues(serviceName, "running", lifetime, memory, enabled).Set(1)
+            // Determine the status value
+            var statusValue float64
+            if fields[2] == "inactive" || fields[2] == "failed" {
+                statusValue = 0 // Set to 0 for inactive or failed
+            } else {
+                statusValue = 1 // Default to 1 for active
+            }
+
+            // Clear the metric for the stopped service before updating it
+            serviceStatus.DeleteLabelValues(serviceName, fields[2], lifetime, memory, enabled)
+
+            // Set the gauge value for the service
+            serviceStatus.WithLabelValues(serviceName, fields[2], lifetime, memory, enabled).Set(statusValue)
         }
     }
 }
+
 
 func main() {
     prometheus.MustRegister(serviceStatus)
@@ -76,7 +79,7 @@ func main() {
         for {
             getServiceStatus()
             // Sleep for some interval before updating again
-            <-time.After(1 * time.Minute)
+            <-time.After(1 * time.Second)
         }
     }()
 
